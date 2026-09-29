@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export function ScrollToTop() {
   const [isVisible, setIsVisible] = useState(false);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const scrollContainer = document.querySelector('[data-article-scroll]') as HTMLDivElement | null;
