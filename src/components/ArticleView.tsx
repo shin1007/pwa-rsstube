@@ -228,9 +228,16 @@ export function ArticleView({
             */}
             {/* 記事の題は、本文の中の見出し（.prose-rich h2 ＝ 本文の1.4倍）より
                 大きいこと。同じだと、どこからが本文の節なのか分からなくなる。 */}
-            <h1 className="mt-2 text-2xl font-bold leading-snug tracking-tight md:text-3xl">
-              {a.summaries?.title_ja?.trim() || a.title}
-            </h1>
+            <a
+              href={a.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 block text-2xl font-bold leading-snug tracking-tight text-zinc-100 hover:text-zinc-300 md:text-3xl transition-colors"
+            >
+              <h1>
+                {a.summaries?.title_ja?.trim() || a.title}
+              </h1>
+            </a>
             {a.summaries?.title_ja?.trim() && a.summaries.title_ja.trim() !== a.title && (
               <p className="mt-1 text-sm text-zinc-500">{a.title}</p>
             )}
