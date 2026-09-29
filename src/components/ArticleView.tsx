@@ -10,6 +10,7 @@ import { ReadingPosition } from '@/components/ReadingPosition';
 import { MediaButton } from '@/components/MediaButton';
 import { ShareButton } from '@/components/ShareButton';
 import { ArticleMobileMenu } from '@/components/ArticleMobileMenu';
+import { ScrollToTop } from '@/components/ScrollToTop';
 import Link from 'next/link';
 
 type ArticleDetail = {
@@ -329,6 +330,8 @@ export function ArticleView({
           </div>
         </div>
       </ArticleSwipe>
+
+      <ScrollToTop />
 
       {/* 前後への導線は、来た道も見るので client 側（ArticleNav）。 */}
       <ArticleNav
