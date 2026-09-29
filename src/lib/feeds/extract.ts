@@ -242,14 +242,14 @@ async function followToBody(
         continue;
       }
 
-      // 別ページは**1本だけ**。PDFと違って、複数を継ぎ足すと別の記事が混ざる。
-      const page = await readHtmlBody(candidate.url);
-      if (!page || !enough(page.text.length)) continue;
+      // 別ページは複数ページに渡る場合も読み込む。次ページへのリンクがあれば辿る。
+      const pages = await readMultiPageBody(candidate.url, until);
+      if (!pages || !enough(pages.text.length)) continue;
       return {
-        text: page.text.slice(0, MAX_CHARS),
-        html: (lead([candidate], '本文') + page.html).slice(0, MAX_HTML_CHARS),
+        text: pages.text.slice(0, MAX_CHARS),
+        html: (lead([candidate], '本文') + pages.html).slice(0, MAX_HTML_CHARS),
         ok: true,
-        imageUrl: imageUrl ?? page.imageUrl,
+        imageUrl: imageUrl ?? pages.imageUrl,
         sources: [candidate],
       };
     } catch {
@@ -264,28 +264,134 @@ async function followToBody(
   return fromPdfText(combined, imageUrl, used);
 }
 
-/** 辿った先のHTMLを読む。**ここからさらに辿らない**（巡回にしないため）。 */
-async function readHtmlBody(
+/** 複数ページに渡る記事を読む。次ページへのリンクを見つけて辿る。 */
+async function readMultiPageBody(
   url: string,
+  until: number,
 ): Promise<{ text: string; html: string; imageUrl: string | null } | null> {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
-    redirect: 'follow',
-    cache: 'no-store',
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) return null;
+  const htmlParts: string[] = [];
+  let imageUrl: string | null = null;
+  let currentUrl = url;
+  const visited = new Set<string>([normalize(url)]);
 
-  const contentType = res.headers.get('content-type') ?? '';
-  if (!contentType.includes('html')) return null;
+  while (htmlParts.join('').length < MAX_CHARS && Date.now() < until) {
+    const res = await fetch(currentUrl, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+      redirect: 'follow',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) break;
 
-  const { document } = parseHTML(decodeBody(contentType, new Uint8Array(await res.arrayBuffer())));
-  const article = new Readability(document).parse();
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('html')) break;
+
+    const body = new Uint8Array(await res.arrayBuffer());
+    const { document } = parseHTML(decodeBody(contentType, body));
+    const article = new Readability(document).parse();
+
+    if (!article?.content) break;
+
+    const html = sanitizeHtml(article.content, currentUrl);
+    htmlParts.push(html);
+
+    if (!imageUrl) {
+      imageUrl = pickImageFromDocument(document, currentUrl);
+    }
+
+    // 次のページへのリンクを見つける
+    const nextUrl = findNextPageLink(document, currentUrl);
+    if (!nextUrl || visited.has(normalize(nextUrl))) break;
+
+    visited.add(normalize(nextUrl));
+    currentUrl = nextUrl;
+  }
+
+  if (htmlParts.length === 0) return null;
+
   return {
-    text: htmlToText(article?.content ?? ''),
-    html: sanitizeHtml(article?.content ?? '', url),
-    imageUrl: pickImageFromDocument(document, url),
+    text: htmlToText(htmlParts.join('\n\n')),
+    html: htmlParts.join('\n\n'),
+    imageUrl,
   };
+}
+
+/**
+ * 次のページへのリンクを見つける。
+ *
+ * 「続き」「次へ」「→」「next」「>」「2」などのパターンを探す。
+ * ページングの最初のページから順に辿るため、相対的に次の要素を探す。
+ */
+function findNextPageLink(
+  document: Parameters<typeof pickFollowups>[0],
+  currentUrl: string,
+): string | null {
+  let base: URL;
+  try {
+    base = new URL(currentUrl);
+  } catch {
+    return null;
+  }
+
+  const patterns = [
+    // 日本語のテキスト
+    /続き|次|もっと|さらに|全文/,
+    // 英語のテキスト
+    /next|continue|more|read more|part \d+/i,
+    // 矢印・記号
+    /^[→>]$|^next$/i,
+    // ページ番号（「1」「2」「3」など、現在より大きい数字）
+    /^\d+$/,
+  ];
+
+  const candidates: { url: URL; text: string; score: number }[] = [];
+
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    const href = anchor.getAttribute('href');
+    if (!href) continue;
+
+    try {
+      const url = new URL(href, currentUrl);
+      // ドメインが変わってたら別サイト
+      if (url.hostname !== base.hostname) continue;
+
+      // 同じURLなら無限ループ
+      if (normalize(url.toString()) === normalize(currentUrl)) continue;
+
+      const text = (anchor.textContent ?? '').trim().toLowerCase();
+      if (!text) continue;
+
+      let score = 0;
+      for (const pattern of patterns) {
+        if (pattern.test(text)) {
+          score += 10;
+          // より短い（シンプルな）テキストを優先
+          score += Math.max(0, 20 - text.length);
+        }
+      }
+
+      if (score > 0) {
+        candidates.push({ url, text, score });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  // スコアが高い候補を返す。同点なら最初に見つかったもの
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].url.toString();
+}
+
+/** URLを正規化して比較できるようにする。 */
+function normalize(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.href.split('#')[0]; // フラグメントを削除
+  } catch {
+    return url;
+  }
 }
 
 /** PDFの文字を記事の形にする。記事URLが直接PDFのときと、辿った先の両方から使う。 */
