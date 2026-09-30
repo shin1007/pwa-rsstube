@@ -137,6 +137,8 @@ export async function extractArticle(url: string): Promise<ExtractResult> {
   const { document } = parseHTML(html);
   // main の中身は Readability に渡す前に控えておく（渡した document は書き換えられる）。
   const mainHtml = mainRegionHtml(document);
+  // Readability は document を書き換えてページ送りを消すので、先に控える。
+  const pagerNext = findPagerNext(document, url);
   const article = new Readability(document).parse();
   // Readability は meta を落とすので、掴む前の document から取る。
   const imageUrl = pickImageFromDocument(document, url);
@@ -147,9 +149,19 @@ export async function extractArticle(url: string): Promise<ExtractResult> {
   // textContent はブロックの境目に何も入れないので段落が全部つながり、代わりに
   // 元HTMLの改行だけが残る。結果、見た目が書き手のHTMLの書き方に左右される
   // （改行だらけのサイトと、改行が1つも無いサイトができる）。lib/feeds/text.ts 参照。
-  const text = htmlToText(content);
+  let text = htmlToText(content);
   // 相対パスの画像やリンクを解決するため、記事のURLを渡す。
-  const safeHtml = sanitizeHtml(content, url);
+  let safeHtml = sanitizeHtml(content, url);
+
+  // 記事が複数ページに割れているとき（Nazology の /2 /3 など）、続きも足す。
+  // 1ページ目が短いときは下の followToBody に任せる。
+  if (pagerNext && text.length >= FOLLOW_BELOW_CHARS) {
+    const more = await readContinuation(pagerNext, url, Date.now() + FOLLOW_BUDGET_MS);
+    if (more.html) {
+      safeHtml += `\n${more.html}`;
+      text += `\n\n${more.text}`;
+    }
+  }
 
   /**
    * 薄いページは「入口で、本体は別にある」ことを疑う。
@@ -262,6 +274,84 @@ async function followToBody(
   const combined = parts.join('\n\n');
   if (!enough(combined.length)) return null;
   return fromPdfText(combined, imageUrl, used);
+}
+
+/**
+ * ページ送りの「次」を、確かなものだけ見つける。
+ *
+ * 記事本文のページ送りは、`rel="next"` か、いまのURLの下に `/N`・`?page=N` を
+ * 付けたものになっている。「次へ」という文字だけで辿ると、関連記事や
+ * 前後の記事へのリンクに迷い込むので、ここでは文字を見ない。
+ */
+function findPagerNext(
+  document: Parameters<typeof pickFollowups>[0],
+  currentUrl: string,
+): string | null {
+  let base: URL;
+  try {
+    base = new URL(currentUrl);
+  } catch {
+    return null;
+  }
+  // ページ番号は1〜2桁だけ見る（3桁以上は記事IDで、ページではない）。
+  const basePath = base.pathname.replace(/\/(\d{1,2})\/?$/, '').replace(/\/$/, '');
+  const current = Number(/\/(\d{1,2})\/?$/.exec(base.pathname)?.[1] ?? base.searchParams.get('page') ?? 1);
+
+  let best: { url: string; n: number } | null = null;
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    let url: URL;
+    try {
+      url = new URL(anchor.getAttribute('href') ?? '', currentUrl);
+    } catch {
+      continue;
+    }
+    if (url.hostname !== base.hostname) continue;
+    const path = url.pathname.replace(/\/(\d{1,2})\/?$/, '').replace(/\/$/, '');
+    const n = Number(/\/(\d{1,2})\/?$/.exec(url.pathname)?.[1] ?? url.searchParams.get('page') ?? 0);
+    if (path !== basePath || n !== current + 1) continue;
+    url.hash = '';
+    best = { url: url.toString(), n };
+    break;
+  }
+  return best?.url ?? null;
+}
+
+/** 2ページ目以降を順に読む。上限は10ページ、時間切れなら取れたところまで。 */
+async function readContinuation(
+  firstUrl: string,
+  origin: string,
+  until: number,
+): Promise<{ html: string; text: string }> {
+  const htmlParts: string[] = [];
+  let next: string | null = firstUrl;
+  const visited = new Set<string>([normalize(origin)]);
+
+  for (let i = 0; next && i < 10 && Date.now() < until; i++) {
+    if (visited.has(normalize(next))) break;
+    visited.add(normalize(next));
+    try {
+      const res = await fetch(next, {
+        headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+        redirect: 'follow',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(15_000),
+      });
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!res.ok || !contentType.includes('html')) break;
+      const body = new Uint8Array(await res.arrayBuffer());
+      const { document } = parseHTML(decodeBody(contentType, body));
+      const following = findPagerNext(document, next);
+      const article = new Readability(document).parse();
+      if (!article?.content) break;
+      htmlParts.push(sanitizeHtml(article.content, next));
+      next = following;
+    } catch {
+      break;
+    }
+  }
+
+  const html = htmlParts.join('\n');
+  return { html, text: html ? htmlToText(html) : '' };
 }
 
 /** 複数ページに渡る記事を読む。次ページへのリンクを見つけて辿る。 */
