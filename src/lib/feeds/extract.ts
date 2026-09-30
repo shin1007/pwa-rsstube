@@ -154,8 +154,8 @@ export async function extractArticle(url: string): Promise<ExtractResult> {
   let safeHtml = sanitizeHtml(content, url);
 
   // 記事が複数ページに割れているとき（Nazology の /2 /3 など）、続きも足す。
-  // 1ページ目が短いときは下の followToBody に任せる。
-  if (pagerNext && text.length >= FOLLOW_BELOW_CHARS) {
+  // 足したあとでまだ短ければ、下の followToBody が本体を探す。
+  if (pagerNext) {
     const more = await readContinuation(pagerNext, url, Date.now() + FOLLOW_BUDGET_MS);
     if (more.html) {
       safeHtml += `\n${more.html}`;
@@ -276,12 +276,32 @@ async function followToBody(
   return fromPdfText(combined, imageUrl, used);
 }
 
+/** URL を「記事の芯」と「ページ番号」に分ける。番号が無ければ1ページ目。 */
+function pageInfo(url: URL): { stem: string; n: number } {
+  let path = url.pathname;
+  let n = 1;
+  // 番号は1〜2桁だけ見る（3桁以上は記事IDで、ページではない）。
+  const dir = /^(.+)\/(\d{1,2})\/?$/.exec(path); // /N  /N/
+  const file = /^(.+)_(\d{1,2})(\.html?)$/i.exec(path); // _N.html（ITmedia）
+  if (dir) {
+    path = dir[1];
+    n = Number(dir[2]);
+  } else if (file) {
+    path = file[1] + file[3];
+    n = Number(file[2]);
+  }
+  const q = [...url.searchParams].find(([k]) => /^(page|p|pg|pn|paged)$/i.test(k));
+  if (q && /^\d{1,2}$/.test(q[1])) n = Number(q[1]);
+  return { stem: url.hostname + path.replace(/\/$/, ''), n };
+}
+
 /**
  * ページ送りの「次」を、確かなものだけ見つける。
  *
- * 記事本文のページ送りは、`rel="next"` か、いまのURLの下に `/N`・`?page=N` を
- * 付けたものになっている。「次へ」という文字だけで辿ると、関連記事や
- * 前後の記事へのリンクに迷い込むので、ここでは文字を見ない。
+ * 記事本文のページ送りは、いまのURLと同じ記事の芯を持ち、番号が1つ大きい
+ * （`/2`・`?page=2`・`?P=2`・`_2.html`）。`rel="next"` と `<a>` の両方から探す。
+ * 「次へ」という文字だけで辿ると、関連記事や前後の記事へ迷い込むので、
+ * 文字は見ない。`rel="next"` も、芯が違えば（＝別の記事なら）採らない。
  */
 function findPagerNext(
   document: Parameters<typeof pickFollowups>[0],
@@ -293,27 +313,22 @@ function findPagerNext(
   } catch {
     return null;
   }
-  // ページ番号は1〜2桁だけ見る（3桁以上は記事IDで、ページではない）。
-  const basePath = base.pathname.replace(/\/(\d{1,2})\/?$/, '').replace(/\/$/, '');
-  const current = Number(/\/(\d{1,2})\/?$/.exec(base.pathname)?.[1] ?? base.searchParams.get('page') ?? 1);
+  const here = pageInfo(base);
 
-  let best: { url: string; n: number } | null = null;
-  for (const anchor of document.querySelectorAll('a[href]')) {
+  for (const el of document.querySelectorAll('link[rel~="next"][href], a[href]')) {
     let url: URL;
     try {
-      url = new URL(anchor.getAttribute('href') ?? '', currentUrl);
+      url = new URL(el.getAttribute('href') ?? '', currentUrl);
     } catch {
       continue;
     }
     if (url.hostname !== base.hostname) continue;
-    const path = url.pathname.replace(/\/(\d{1,2})\/?$/, '').replace(/\/$/, '');
-    const n = Number(/\/(\d{1,2})\/?$/.exec(url.pathname)?.[1] ?? url.searchParams.get('page') ?? 0);
-    if (path !== basePath || n !== current + 1) continue;
+    const there = pageInfo(url);
+    if (there.stem !== here.stem || there.n !== here.n + 1) continue;
     url.hash = '';
-    best = { url: url.toString(), n };
-    break;
+    return url.toString();
   }
-  return best?.url ?? null;
+  return null;
 }
 
 /** 2ページ目以降を順に読む。上限は10ページ、時間切れなら取れたところまで。 */
