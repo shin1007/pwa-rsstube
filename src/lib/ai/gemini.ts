@@ -8,13 +8,20 @@ import { GoogleGenAI } from '@google/genai';
  * 一時的な失敗はジョブキューに戻して後で再試行させる。
  */
 
-let client: GoogleGenAI | null = null;
+/**
+ * 鍵ごとのクライアント。鍵はユーザーごとに違う（0046・lib/ai/keys.ts）。
+ *
+ * **鍵は必ず呼び出し側から渡すこと。** ここで環境変数に落とすと、
+ * 鍵を入れていないユーザーの処理がオーナーの無料枠で黙って動く。
+ */
+const clients = new Map<string, GoogleGenAI>();
 
-function ai(): GoogleGenAI {
+export function geminiClient(apiKey: string): GoogleGenAI {
+  if (!apiKey) throw new Error('Gemini の API キーがありません');
+  let client = clients.get(apiKey);
   if (!client) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY が設定されていません');
     client = new GoogleGenAI({ apiKey });
+    clients.set(apiKey, client);
   }
   return client;
 }
@@ -46,6 +53,8 @@ export type Usage = { inputTokens: number; outputTokens: number };
  * ここには無いため。ここで記録しようとすると、この薄いラッパが DB を持つことになる。
  */
 export async function generateJson<T>(opts: {
+  /** 誰の鍵で呼ぶか（lib/ai/keys.ts）。 */
+  apiKey: string;
   model: string;
   prompt: string;
   schema: Record<string, unknown>;
@@ -62,7 +71,7 @@ export async function generateJson<T>(opts: {
   thinkingBudget?: number;
 }): Promise<{ data: T; usage: Usage }> {
   try {
-    const res = await ai().models.generateContent({
+    const res = await geminiClient(opts.apiKey).models.generateContent({
       model: opts.model,
       contents: opts.prompt,
       config: {

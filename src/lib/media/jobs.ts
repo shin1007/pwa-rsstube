@@ -4,6 +4,7 @@ import { DEFAULT_VOICE_MODE } from '@/lib/settings/defaults';
 import { synthesize } from '@/lib/ai/tts';
 import { RetryableError, SCRIPT_MODEL } from '@/lib/ai/gemini';
 import { TTS_MODEL } from '@/lib/ai/tts';
+import { geminiKeyFor } from '@/lib/ai/keys';
 import { recordUsage } from '@/lib/ai/usage';
 import { complete, enqueueMany, fail, release, type Job } from '@/lib/jobs/queue';
 import { fetchImageUrl } from '@/lib/feeds/image';
@@ -38,6 +39,8 @@ export async function runScriptJob(db: SupabaseClient, job: Job): Promise<boolea
     return false;
   }
 
+  // 失敗の記録をどの鍵に付けるか。鍵を引く前に転んだら付けない。
+  let keyOwner: string | null = null;
   try {
     const { data: media } = await db
       .from('media')
@@ -50,6 +53,14 @@ export async function runScriptJob(db: SupabaseClient, job: Job): Promise<boolea
       return false;
     }
 
+    // 作らせた本人の鍵で作る（0046）。無ければ待っても動かないので、ここで止める。
+    const apiKey = await geminiKeyFor(db, media.user_id);
+    if (!apiKey) {
+      await giveUpForMissingKey(db, job, mediaId);
+      return false;
+    }
+    keyOwner = media.user_id;
+
     await db.from('media').update({ status: 'scripting' }).eq('id', mediaId);
 
     const source = await loadSource(db, media);
@@ -57,8 +68,8 @@ export async function runScriptJob(db: SupabaseClient, job: Job): Promise<boolea
     // 見に行かないのは、生成中に設定を変えられると台本と声が食い違うため。
     const mode = (media.voice_mode ?? DEFAULT_VOICE_MODE) as VoiceMode;
     const { extra, language } = await scriptSettings(db, media.user_id);
-    const { lines, slides, usage } = await generateScript(source, extra, mode, language);
-    await recordUsage(db, SCRIPT_MODEL, usage.inputTokens, usage.outputTokens, true);
+    const { lines, slides, usage } = await generateScript(apiKey, source, extra, mode, language);
+    await recordUsage(db, media.user_id, SCRIPT_MODEL, usage.inputTokens, usage.outputTokens, true);
 
     // 表紙。絵を持っている最初の記事のものを使う（ダイジェストなら選抜順の先頭）。
     // 台本ができてから取りに行く。台本が失敗する回のぶんまで相手のサイトを
@@ -110,7 +121,7 @@ export async function runScriptJob(db: SupabaseClient, job: Job): Promise<boolea
     await complete(db, job.id);
     return true;
   } catch (err) {
-    await recordUsage(db, SCRIPT_MODEL, 0, 0, false);
+    if (keyOwner) await recordUsage(db, keyOwner, SCRIPT_MODEL, 0, 0, false);
     await markFailed(db, mediaId, err);
     await fail(db, job.id, err);
     return false;
@@ -135,6 +146,7 @@ export async function runTtsJob(
     return false;
   }
 
+  let keyOwner: string | null = null;
   try {
     const { data: media } = await db
       .from('media')
@@ -171,13 +183,21 @@ export async function runTtsJob(
       return false;
     }
 
+    const apiKey = await geminiKeyFor(db, media.user_id);
+    if (!apiKey) {
+      await giveUpForMissingKey(db, job, mediaId);
+      return false;
+    }
+    keyOwner = media.user_id;
+
     const { mp3, durationSec, usage } = await synthesize(
+      apiKey,
       group.lines,
       (media.voice_mode ?? DEFAULT_VOICE_MODE) as VoiceMode,
       { a: media.voice_a, b: media.voice_b },
       AbortSignal.timeout(Math.max(5_000, hardDeadline - Date.now())),
     );
-    await recordUsage(db, TTS_MODEL, usage.inputTokens, usage.outputTokens, true);
+    await recordUsage(db, media.user_id, TTS_MODEL, usage.inputTokens, usage.outputTokens, true);
 
     // パスの先頭を持ち主にしておくと、Storage 側の権限をフォルダ名だけで判定できる。
     const path = `${media.user_id}/${mediaId}/${idx}.mp3`;
@@ -205,7 +225,7 @@ export async function runTtsJob(
       return false;
     }
 
-    await recordUsage(db, TTS_MODEL, 0, 0, false);
+    if (keyOwner) await recordUsage(db, keyOwner, TTS_MODEL, 0, 0, false);
     // 合成の失敗は1セグメントぶん。media 全体を落とさず、そのジョブだけ再試行する。
     await markFailed(db, mediaId, err, false);
     await fail(db, job.id, err);
@@ -256,6 +276,22 @@ async function finishIfDone(db: SupabaseClient, mediaId: string): Promise<void> 
       updated_at: new Date().toISOString(),
     })
     .eq('id', mediaId);
+}
+
+/**
+ * 鍵が無いので作れない。
+ *
+ * **再試行に回さないこと。** fail に回すとバックオフを挟んで何度も同じ理由で
+ * 転び、そのあいだ画面は「生成中」のまま動かない。音声を落として、
+ * 何をすれば作れるかを残す。鍵を入れたあとは「聴く」の作り直しから続きを作れる。
+ */
+async function giveUpForMissingKey(db: SupabaseClient, job: Job, mediaId: string) {
+  await markFailed(
+    db,
+    mediaId,
+    new Error('Gemini の API キーが設定されていません。設定画面で入れてから作り直してください'),
+  );
+  await complete(db, job.id);
 }
 
 /**

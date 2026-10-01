@@ -9,7 +9,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * 上限に当たって初めて気づくことになる（ジョブが 429 でバックオフし、
  * 要約が静かに遅れ続ける）。
  *
- * 記録は日×モデルの集計（0009）。呼び出しごとに行を作ると掃除が要るため。
+ * 記録は日×モデル×鍵の持ち主の集計（0009・0046）。呼び出しごとに行を作ると
+ * 掃除が要るため。無料枠は鍵ごとに数えられるので、誰の鍵で呼んだかを分けて持つ。
  */
 
 export type UsageDay = {
@@ -29,6 +30,8 @@ export type UsageDay = {
  */
 export async function recordUsage(
   db: SupabaseClient,
+  /** 誰の鍵で呼んだか（lib/ai/keys.ts）。作らせた人ではなく、鍵の持ち主。 */
+  userId: string,
   model: string,
   inputTokens: number,
   outputTokens: number,
@@ -39,11 +42,12 @@ export async function recordUsage(
     p_input: inputTokens,
     p_output: outputTokens,
     p_ok: ok,
+    p_user: userId,
   });
   if (error) console.error('使用量の記録に失敗:', error.message);
 }
 
-/** 直近の使用量。設定画面に出す。 */
+/** 直近の使用量。設定画面に出す。自分の鍵のぶんだけ返る（RLS。0046）。 */
 export async function recentUsage(days = 7): Promise<UsageDay[]> {
   const supabase = await createClient();
 

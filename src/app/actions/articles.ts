@@ -1,5 +1,6 @@
 'use server';
 
+import { canUseAi, MISSING_KEY_MESSAGE } from '@/lib/ai/keys';
 import { attempt } from '@/lib/actions/result';
 import { currentUser } from '@/lib/auth/session';
 import { listArticles } from '@/lib/articles';
@@ -122,6 +123,7 @@ export async function setStarred(articleId: string, starred: boolean) {
 export async function setReadMany(articleIds: string[], read = true) {
   if (articleIds.length === 0) return;
   const { supabase, userId } = await client();
+  if (!(await canUseAi(userId))) throw new Error(MISSING_KEY_MESSAGE);
 
   const now = new Date().toISOString();
   const { error } = await supabase.from('article_states').upsert(
@@ -150,6 +152,7 @@ export async function requestSummaries(articleIds: string[]) {
 async function requestSummariesImpl(articleIds: string[]) {
   if (articleIds.length === 0) return;
   const { supabase, userId } = await client();
+  if (!(await canUseAi(userId))) throw new Error(MISSING_KEY_MESSAGE);
 
   // 未処理ジョブがある記事は先に除く。jobs の一意索引は部分索引なので
   // upsert では回避できず、1件でもぶつかると insert 全体が落ちてしまう。
@@ -231,6 +234,8 @@ export async function requestSummary(articleId: string) {
 
 async function requestSummaryImpl(articleId: string) {
   const { supabase, userId } = await client();
+  // 鍵が無いまま積んでも、要約は見送られて何も起きない（0046）。押した時点で言う。
+  if (!(await canUseAi(userId))) throw new Error(MISSING_KEY_MESSAGE);
   const { error } = await supabase
     .from('jobs')
     .insert({ user_id: userId, type: 'extract', payload: { article_id: articleId } });

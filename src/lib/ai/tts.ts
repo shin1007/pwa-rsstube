@@ -1,6 +1,5 @@
 import lamejs from '@breezystack/lamejs';
-import { GoogleGenAI } from '@google/genai';
-import { RetryableError, type Usage } from './gemini';
+import { geminiClient, RetryableError, type Usage } from './gemini';
 import { SPEAKERS, type ScriptLine, type VoiceMode } from './script';
 
 /**
@@ -54,17 +53,6 @@ export function normalizeVoice(name: unknown, fallback: string): string {
   return typeof name === 'string' && name in TTS_VOICES ? name : fallback;
 }
 
-let client: GoogleGenAI | null = null;
-
-function ai(): GoogleGenAI {
-  if (!client) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY が設定されていません');
-    client = new GoogleGenAI({ apiKey });
-  }
-  return client;
-}
-
 export type Synthesized = {
   mp3: Buffer;
   /** 秒。PCM の長さから出すので実測値。 */
@@ -80,6 +68,8 @@ export function toSpeechText(lines: ScriptLine[]): string {
 }
 
 export async function synthesize(
+  /** 作らせた本人の鍵（lib/ai/keys.ts）。 */
+  apiKey: string,
   lines: ScriptLine[],
   mode: VoiceMode = 'dialogue',
   /**
@@ -137,7 +127,7 @@ export async function synthesize(
 
   let res;
   try {
-    res = await ai().models.generateContent({
+    res = await geminiClient(apiKey).models.generateContent({
       model: TTS_MODEL,
       contents: prompt,
       config: {
