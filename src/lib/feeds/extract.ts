@@ -6,6 +6,7 @@ import { sanitizeHtml } from '@/lib/feeds/sanitize';
 import { pickImageFromDocument } from '@/lib/feeds/image';
 import { pickFollowups, type Followup } from '@/lib/feeds/followup';
 import { looksLikeFrame, mainRegionHtml } from '@/lib/feeds/frame';
+import { pickPageLinks } from '@/lib/feeds/pages';
 import { fetchPdfText, pdfTextToParagraphs, readPdf } from '@/lib/feeds/pdf';
 
 /**
@@ -137,6 +138,8 @@ export async function extractArticle(url: string): Promise<ExtractResult> {
   const { document } = parseHTML(html);
   // main の中身は Readability に渡す前に控えておく（渡した document は書き換えられる）。
   const mainHtml = mainRegionHtml(document);
+  // ページ送りのリンクも Readability に消される前に控える（lib/feeds/pages.ts）。
+  const pageLinks = pickPageLinks(document, url);
   const article = new Readability(document).parse();
   // Readability は meta を落とすので、掴む前の document から取る。
   const imageUrl = pickImageFromDocument(document, url);
@@ -147,9 +150,26 @@ export async function extractArticle(url: string): Promise<ExtractResult> {
   // textContent はブロックの境目に何も入れないので段落が全部つながり、代わりに
   // 元HTMLの改行だけが残る。結果、見た目が書き手のHTMLの書き方に左右される
   // （改行だらけのサイトと、改行が1つも無いサイトができる）。lib/feeds/text.ts 参照。
-  const text = htmlToText(content);
+  let text = htmlToText(content);
   // 相対パスの画像やリンクを解決するため、記事のURLを渡す。
-  const safeHtml = sanitizeHtml(content, url);
+  let safeHtml = sanitizeHtml(content, url);
+
+  // 複数ページの記事（WordPress の /記事/2 など）は続きも継ぎ足す。1ページ目だけだと
+  // 長さはあるので成功に見えたまま前半しか取れない。1本が転んでも取れたぶんで進める。
+  const pagesUntil = Date.now() + FOLLOW_BUDGET_MS;
+  for (const pageUrl of pageLinks) {
+    if (Date.now() >= pagesUntil) break;
+    try {
+      const page = await readSinglePage(pageUrl);
+      if (!page || page.text.length === 0) continue;
+      text += `
+
+${page.text}`;
+      safeHtml += page.html;
+    } catch {
+      continue;
+    }
+  }
 
   /**
    * 薄いページは「入口で、本体は別にある」ことを疑う。
@@ -262,6 +282,23 @@ async function followToBody(
   const combined = parts.join('\n\n');
   if (!enough(combined.length)) return null;
   return fromPdfText(combined, imageUrl, used);
+}
+
+/** 続きの1ページを読む。ここからさらに辿らない。 */
+async function readSinglePage(url: string): Promise<{ text: string; html: string } | null> {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+    redirect: 'follow',
+    cache: 'no-store',
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) return null;
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('html')) return null;
+  const { document } = parseHTML(decodeBody(contentType, new Uint8Array(await res.arrayBuffer())));
+  const article = new Readability(document).parse();
+  if (!article?.content) return null;
+  return { text: htmlToText(article.content), html: sanitizeHtml(article.content, url) };
 }
 
 /** 複数ページに渡る記事を読む。次ページへのリンクを見つけて辿る。 */
