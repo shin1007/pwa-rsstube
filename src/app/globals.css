@@ -306,6 +306,29 @@ body {
  *      上下均等だとどちらに属するのか読めない。
  *   3. 明るさ  —— 本文は zinc-300、見出しは白。太字だけでは目が拾わない。
  */
+/*
+ * まとめサイトのコメント（lib/feeds/comments.ts）。ヘッダー（番号・名前・日時）を
+ * 小さく薄くし、本文との差で発言の切れ目を作る。左の線で一組にまとめる。
+ */
+.prose-rich .comment {
+  margin-bottom: 1.1em;
+  padding-left: 0.75em;
+  border-left: 2px solid #3f3f46;
+}
+.prose-rich .comment > p { margin-bottom: 0; }
+.prose-rich .comment-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.6em;
+  font-size: 0.72em;
+  line-height: 1.6;
+  color: #71717a;
+}
+.prose-rich .comment-no { font-weight: 600; color: #a1a1aa; }
+.prose-rich .comment-name { color: #8b8b94; }
+.prose-rich .comment-body { margin-top: 0.1em; }
+.prose-rich .comment-body p { margin-bottom: 0.4em; }
+
 .prose-rich h1,
 .prose-rich h2,
 .prose-rich h3,

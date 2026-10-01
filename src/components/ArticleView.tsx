@@ -10,6 +10,7 @@ import { ReadingPosition } from '@/components/ReadingPosition';
 import { MediaButton } from '@/components/MediaButton';
 import { ShareButton } from '@/components/ShareButton';
 import { ArticleMobileMenu } from '@/components/ArticleMobileMenu';
+import { formatComments } from '@/lib/feeds/comments';
 import Link from 'next/link';
 
 type ArticleDetail = {
@@ -312,7 +313,7 @@ export function ArticleView({
                 // 実寸は .prose-rich が持つ（globals.css の --text-body）。
                 // ここに書くと「文字の大きさ」の設定が本文にだけ効かなくなる。
                 className="prose-rich mt-5 text-zinc-300"
-                dangerouslySetInnerHTML={{ __html: a.content_html }}
+                dangerouslySetInnerHTML={{ __html: formatComments(a.content_html) }}
               />
             ) : (
               <div className="prose-article mt-5 text-zinc-300">
