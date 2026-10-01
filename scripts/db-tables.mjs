@@ -14,9 +14,10 @@
  *   schema_migrations    db:migrate が管理する
  *   google_accounts      リフレッシュトークン。**平文のJSONに書き出したくない**
  *   app_config           Google のクライアントシークレット。同上（0033）
+ *   ai_keys              ユーザーごとの Gemini API キー。同上（0046）
  *
- * 後ろ2つは秘密そのものなので、意図して外してある。失うと繋ぎ直し（app_config は
- * Google Cloud Console から取り直して設定画面へ入れ直す）になるが、
+ * 後ろ3つは秘密そのものなので、意図して外してある。失うと繋ぎ直し（app_config は
+ * Google Cloud Console から、ai_keys は Google AI Studio から取り直して設定画面へ入れ直す）になるが、
  * backups/ に平文で置くほうが割に合わない。**この判断ごと消さないこと。**
  *
  * 音声の実体（Supabase Storage の mp3）はここでは取れない。media / media_segments は

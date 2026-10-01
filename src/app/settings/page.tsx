@@ -40,6 +40,8 @@ import {
   DEFAULT_VOICE_MODE,
 } from '@/lib/settings/defaults';
 import { getDriveStatus, saveGoogleCredentials } from '@/app/actions/drive';
+import { deleteGeminiKey, getGeminiKeyStatus, saveGeminiKey } from '@/app/actions/ai-keys';
+import { GeminiKeyForm } from '@/components/GeminiKeyForm';
 import { DEFAULT_NOTEBOOKLM_PROMPT } from '@/lib/export/prompt';
 import { createClient } from '@/lib/supabase/server';
 import Link from 'next/link';
@@ -76,7 +78,7 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
     ? ((await searchParams).drive as string)
     : undefined;
 
-  const [feeds, { data: folders }, { data: settings }, drive, { data: passkeys }] =
+  const [feeds, { data: folders }, { data: settings }, drive, { data: passkeys }, geminiKey] =
     await Promise.all([
       listSubscribedFeeds({ stats: true }),
       // 並び順はサイドバーと揃える（sort_order → 名前）。
@@ -88,6 +90,7 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
         .from('passkeys')
         .select('id, label, device_type, backed_up, created_at, last_used_at')
         .order('created_at'),
+      getGeminiKeyStatus(),
     ]);
 
   /**
@@ -149,6 +152,25 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
     };
   }
 
+  /**
+   * Gemini の API キー。鍵はユーザーごと（0046）。
+   *
+   * 2人目以降はここに入れるまで AI が動かないので、**入っていないときは
+   * いちばん上に出す。** 入っていれば、たまにしか触らない設定として下へ回す。
+   */
+  const geminiKeySection = (
+    <section>
+      <h2 className="mb-2 section-title">Gemini の API キー（要約・音声）</h2>
+      <GeminiKeyForm
+        usable={geminiKey.usable}
+        masked={geminiKey.masked}
+        fromEnv={geminiKey.fromEnv}
+        save={saveGeminiKey}
+        remove={deleteGeminiKey}
+      />
+    </section>
+  );
+
   return (
     <AppShell>
       <main className="flex-1 min-w-0 overflow-y-auto p-4 md:p-8">
@@ -192,6 +214,8 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
           </div>
         </div>
 
+        {!geminiKey.usable && geminiKeySection}
+
         {/* ---------------- 外観設定 ---------------- */}
         {/* 読むことに直結するので上のほうに置く。
             設定を開く動機のほとんどは「読みにくい・見づらい」なので。 */}
@@ -214,6 +238,8 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
           <h2 className="mb-2 section-title">パスキー（指紋・顔・PINでログイン）</h2>
           <PasskeyManager passkeys={(passkeys ?? []) as PasskeyRow[]} />
         </section>
+
+        {geminiKey.usable && geminiKeySection}
 
         {/* ---------------- NotebookLM 用の指示文 ---------------- */}
         <section>

@@ -1,5 +1,6 @@
 'use server';
 
+import { canUseAi, MISSING_KEY_MESSAGE } from '@/lib/ai/keys';
 import { currentUser } from '@/lib/auth/session';
 import { requestMedia, retryMedia, type MediaTarget, type RetryFrom } from '@/lib/media/create';
 import { getPlayable, type MediaSource, type PlayableSegment } from '@/lib/media/list';
@@ -59,6 +60,9 @@ async function run(
   target: MediaTarget,
   title: string,
 ): Promise<MediaRequestResult> {
+  // 台本も音声も、作らせた本人の鍵で作る（0046）。無いなら受け付けない。
+  if (!(await canUseAi(userId))) return { ok: false, message: MISSING_KEY_MESSAGE };
+
   let id: string;
   let created: boolean;
   let retried: boolean;
@@ -106,6 +110,7 @@ export async function retryMediaAction(mediaId: string): Promise<MediaRequestRes
     .eq('id', mediaId)
     .maybeSingle();
   if (!media) return { ok: false, message: '音声が見つかりません' };
+  if (!(await canUseAi(user.id))) return { ok: false, message: MISSING_KEY_MESSAGE };
 
   let from: RetryFrom;
   try {

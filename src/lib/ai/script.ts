@@ -423,6 +423,8 @@ function buildPrompt(
 }
 
 export async function generateScript(
+  /** 作らせた本人の鍵（lib/ai/keys.ts）。 */
+  apiKey: string,
   source: ScriptSource,
   extra = '',
   mode: VoiceMode = 'dialogue',
@@ -433,6 +435,7 @@ export async function generateScript(
   const p = plan(source.articles.length);
 
   const { data, usage } = await generateJson<{ slides: RawSlide[]; lines: ScriptLine[] }>({
+    apiKey,
     model: SCRIPT_MODEL,
     prompt: buildPrompt(source, extra, mode, language),
     schema: buildSchema(p.slides, p.lines),

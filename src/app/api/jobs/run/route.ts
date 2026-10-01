@@ -1,5 +1,6 @@
 import { BATCH_SIZE, summarizeBatch, type SummaryInput } from '@/lib/ai/summarize';
 import { SUMMARY_MODEL } from '@/lib/ai/gemini';
+import { summaryKeysFor, type KeyHolder } from '@/lib/ai/keys';
 import { recordUsage } from '@/lib/ai/usage';
 import { contentHash, usableAsFallback } from '@/lib/feeds/content';
 import { classifyError, retryAt, shouldRetry, type ExtractFailure } from '@/lib/feeds/retry';
@@ -295,8 +296,16 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
 
     const { data: articles } = await db
       .from('articles')
-      .select('id, title, content_text, content_ok')
+      .select('id, feed_id, title, content_text, content_ok')
       .in('id', [...byArticle.keys()]);
+
+    /**
+     * 誰の鍵で要約するか（0046・lib/ai/keys.ts）。記事は共通なので、
+     * フィードの購読者のうちの誰か1人の鍵で1回作れば全員に付く。
+     */
+    const keys = await summaryKeysFor(db, [
+      ...new Set((articles ?? []).map((a) => a.feed_id as string)),
+    ]);
 
     /**
      * 中身が空の記事はモデルに渡さない。
@@ -306,7 +315,8 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
      * 入力の説明が返ってきて、それが要約として保存される。
      * ジョブは完了扱いにする——待たせても中身が増えることはない。
      */
-    const inputs: SummaryInput[] = [];
+    const groups = new Map<string, { holder: KeyHolder; inputs: SummaryInput[] }>();
+    const skipped: string[] = [];
     for (const a of articles ?? []) {
       const text = (a.content_text ?? '').trim();
       if (!text) {
@@ -317,67 +327,102 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
         }
         continue;
       }
-      inputs.push({ id: a.id, title: a.title, text, contentOk: a.content_ok });
+      const holder = keys.get(a.feed_id);
+      if (!holder) {
+        skipped.push(a.id);
+        continue;
+      }
+      const group = groups.get(holder.userId) ?? { holder, inputs: [] };
+      group.inputs.push({ id: a.id, title: a.title, text, contentOk: a.content_ok });
+      groups.set(holder.userId, group);
     }
-    if (inputs.length === 0) continue;
 
-    try {
-      const { results, model, usage } = await summarizeBatch(inputs, language);
-      await recordUsage(db, model, usage.inputTokens, usage.outputTokens, true);
-
-      if (results.length > 0) {
-        const { error } = await db.from('summaries').upsert(
-          results.map((r) => ({
-            article_id: r.id,
-            // 空で返ってきたら列を埋めない。空文字を入れると「訳した結果が空」と
-            // 区別できず、画面側で原題に戻す判断ができなくなる。
-            title_ja: r.title_ja?.trim() || null,
-            bullets: r.bullets,
-            tags: r.tags,
-            model,
-          })),
-          { onConflict: 'article_id' },
-        );
-        if (error) throw error;
+    /**
+     * 鍵を持つ購読者が1人もいない記事は、要約を見送る。
+     *
+     * **印を付けること。** 0045 で「要約が付くまで一覧に出さない」にしたので、
+     * 印が無いとこの記事は永久に一覧に出ない（待っても付かない）。
+     * あとで誰かが鍵を入れたら、「要約なし」ビューから積み直せる。
+     */
+    if (skipped.length > 0) {
+      const { error } = await db
+        .from('articles')
+        .update({ summary_skipped_at: new Date().toISOString() })
+        .in('id', skipped);
+      if (error) throw error;
+      for (const id of skipped) {
+        const job = byArticle.get(id);
+        if (job) await complete(db, job.id);
+        byArticle.delete(id);
       }
-
-      // 返ってきたぶんは完了。
-      const returned = new Set(results.map((r) => r.id));
-      for (const [articleId, job] of byArticle) {
-        if (returned.has(articleId)) await complete(db, job.id);
-      }
-
-      /**
-       * 返らなかった記事は**1回だけ**やり直させる。
-       *
-       * モデルは5件のうち1件を落とすことがある。以前はここで完了扱いにしていたので、
-       * 落ちた記事には二度と要約が付かなかった（実データで5件が取り残されていた）。
-       * かといって無制限に再試行すると無料枠を食い潰す。
-       *
-       * `fail_job` の max_attempts に 2 を渡し、2回目で諦めさせる。次の回では
-       * 別の記事と組み合わさるので、同じ落ち方をする確率は低い。
-       * 諦めたものは「要約なし」ビューに残り、手で積み直せる。
-       */
-      for (const [articleId, job] of byArticle) {
-        if (returned.has(articleId)) continue;
-        const { error } = await db.rpc('fail_job', {
-          job_id: job.id,
-          err: 'モデルがこの記事を返しませんでした',
-          max_attempts: 2,
-        });
-        if (error) throw error;
-      }
-
-      done += results.length;
-    } catch (err) {
-      // 失敗した呼び出しも RPD を1回ぶん食う（429 で弾かれた場合は特に、
-      // 「もう上限に当たっている」ことが数字に出ていないと原因を追えない）。
-      await recordUsage(db, SUMMARY_MODEL, 0, 0, false);
-
-      // RetryableError（429など）はバックオフして次回に回る。
-      for (const job of byArticle.values()) await fail(db, job.id, err);
-      break; // レート制限に当たっているなら、この実行では以降も失敗する。
     }
+
+    let limited = false;
+    for (const { holder, inputs } of groups.values()) {
+      const groupJobs = new Map(
+        inputs.map((a) => [a.id, byArticle.get(a.id)!] as const).filter(([, j]) => j),
+      );
+      try {
+        const { results, model, usage } = await summarizeBatch(holder.apiKey, inputs, language);
+        await recordUsage(db, holder.userId, model, usage.inputTokens, usage.outputTokens, true);
+
+        if (results.length > 0) {
+          const { error } = await db.from('summaries').upsert(
+            results.map((r) => ({
+              article_id: r.id,
+              // 空で返ってきたら列を埋めない。空文字を入れると「訳した結果が空」と
+              // 区別できず、画面側で原題に戻す判断ができなくなる。
+              title_ja: r.title_ja?.trim() || null,
+              bullets: r.bullets,
+              tags: r.tags,
+              model,
+            })),
+            { onConflict: 'article_id' },
+          );
+          if (error) throw error;
+        }
+
+        // 返ってきたぶんは完了。
+        const returned = new Set(results.map((r) => r.id));
+        for (const [articleId, job] of groupJobs) {
+          if (returned.has(articleId)) await complete(db, job.id);
+        }
+
+        /**
+         * 返らなかった記事は**1回だけ**やり直させる。
+         *
+         * モデルは5件のうち1件を落とすことがある。以前はここで完了扱いにしていたので、
+         * 落ちた記事には二度と要約が付かなかった（実データで5件が取り残されていた）。
+         * かといって無制限に再試行すると無料枠を食い潰す。
+         *
+         * `fail_job` の max_attempts に 2 を渡し、2回目で諦めさせる。次の回では
+         * 別の記事と組み合わさるので、同じ落ち方をする確率は低い。
+         * 諦めたものは「要約なし」ビューに残り、手で積み直せる。
+         */
+        for (const [articleId, job] of groupJobs) {
+          if (returned.has(articleId)) continue;
+          const { error } = await db.rpc('fail_job', {
+            job_id: job.id,
+            err: 'モデルがこの記事を返しませんでした',
+            max_attempts: 2,
+          });
+          if (error) throw error;
+        }
+
+        done += results.length;
+      } catch (err) {
+        // 失敗した呼び出しも RPD を1回ぶん食う（429 で弾かれた場合は特に、
+        // 「もう上限に当たっている」ことが数字に出ていないと原因を追えない）。
+        await recordUsage(db, holder.userId, SUMMARY_MODEL, 0, 0, false);
+
+        // RetryableError（429など）はバックオフして次回に回る。
+        for (const job of groupJobs.values()) await fail(db, job.id, err);
+        // レート制限に当たっているなら、この実行では以降も失敗する見込みが高い。
+        // 鍵は人ごとに違うので、この回の残りの組は試す。
+        limited = true;
+      }
+    }
+    if (limited) break;
   }
 
   return done;

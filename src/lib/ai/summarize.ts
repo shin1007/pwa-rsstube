@@ -125,6 +125,8 @@ function buildPrompt(articles: SummaryInput[], language: string): string {
 }
 
 export async function summarizeBatch(
+  /** 誰の鍵で呼ぶか。記事は共通なので、購読者のうちの誰か（lib/ai/keys.ts）。 */
+  apiKey: string,
   articles: SummaryInput[],
   language = 'ja',
 ): Promise<{ results: SummaryOutput[]; model: string; usage: Usage }> {
@@ -133,6 +135,7 @@ export async function summarizeBatch(
   }
 
   const { data, usage } = await generateJson<{ summaries: SummaryOutput[] }>({
+    apiKey,
     model: SUMMARY_MODEL,
     prompt: buildPrompt(articles, language),
     schema: SCHEMA,
