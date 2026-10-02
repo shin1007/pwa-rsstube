@@ -1,4 +1,5 @@
 import { geminiClient } from './gemini';
+import { DEFAULT_LANGUAGE, normalizeLanguage } from '@/lib/language';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -39,22 +40,24 @@ export async function geminiKeyFor(db: SupabaseClient, userId: string): Promise<
 }
 
 /**
- * 要約に使う鍵を、フィードごとに決める。
+ * 要約に使う鍵を、フィード×言語ごとに決める（0047）。
  *
- * 要約は全員共通（0005）なので、記事1件につき誰か1人の鍵で1回作れば足りる。
- * 選び方:
- *   1. オーナーが購読していればオーナー。もともとオーナーの枠で作っていたもので、
- *      2人目が同じフィードを購読しても、その人の枠を減らさない
+ * 要約は同じ言語の読み手どうしで共通なので、記事1件×言語1つにつき
+ * 誰か1人の鍵で1回作れば足りる。**その言語で読む購読者の鍵だけを使う**
+ * ——英語で読む人のために、日本語で読む人の枠を減らさない。
+ * 選び方（言語ごと）:
+ *   1. その言語で読むオーナーが購読していればオーナー。もともとオーナーの枠で
+ *      作っていたもので、2人目が同じフィードを購読しても、その人の枠を減らさない
  *   2. いなければ、鍵を持つ購読者のうち先に購読した人。同じ人に寄るので、
  *      1日の使用量が読みやすい
  *
- * 誰も鍵を持っていないフィードは Map に入らない（＝要約を見送る）。
+ * 鍵を持つ読み手が1人もいない言語は入らない（＝その言語の要約は作らない）。
  */
 export async function summaryKeysFor(
   db: SupabaseClient,
   feedIds: string[],
-): Promise<Map<string, KeyHolder>> {
-  const out = new Map<string, KeyHolder>();
+): Promise<Map<string, Map<string, KeyHolder>>> {
+  const out = new Map<string, Map<string, KeyHolder>>();
   if (feedIds.length === 0) return out;
 
   const { data: subs, error } = await db
@@ -66,13 +69,18 @@ export async function summaryKeysFor(
   if (!subs?.length) return out;
 
   const userIds = [...new Set(subs.map((s) => s.user_id as string))];
-  const { data: keys, error: keyError } = await db
-    .from('ai_keys')
-    .select('user_id, gemini_api_key')
-    .in('user_id', userIds);
+  const [{ data: keys, error: keyError }, { data: settings, error: settingsError }] =
+    await Promise.all([
+      db.from('ai_keys').select('user_id, gemini_api_key').in('user_id', userIds),
+      db.from('settings').select('user_id, summary_language').in('user_id', userIds),
+    ]);
   if (keyError) throw keyError;
+  if (settingsError) throw settingsError;
 
   const stored = new Map((keys ?? []).map((k) => [k.user_id as string, k.gemini_api_key as string]));
+  const languageOf = new Map(
+    (settings ?? []).map((s) => [s.user_id as string, normalizeLanguage(s.summary_language)]),
+  );
   const keyOf = (userId: string) => stored.get(userId) || fallbackKey(userId);
   const owner = ownerId();
 
@@ -81,13 +89,15 @@ export async function summaryKeysFor(
     const ordered = owner && subscribers.includes(owner)
       ? [owner, ...subscribers.filter((u) => u !== owner)]
       : subscribers;
+    const byLanguage = new Map<string, KeyHolder>();
     for (const userId of ordered) {
+      // settings の行が無い人は既定の言語（列の既定と同じ）。
+      const language = languageOf.get(userId) ?? DEFAULT_LANGUAGE;
+      if (byLanguage.has(language)) continue;
       const apiKey = keyOf(userId);
-      if (apiKey) {
-        out.set(feedId, { userId, apiKey });
-        break;
-      }
+      if (apiKey) byLanguage.set(language, { userId, apiKey });
     }
+    if (byLanguage.size > 0) out.set(feedId, byLanguage);
   }
   return out;
 }

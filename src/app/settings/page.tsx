@@ -44,6 +44,9 @@ import { deleteGeminiKey, getGeminiKeyStatus, saveGeminiKey } from '@/app/action
 import { GeminiKeyForm } from '@/components/GeminiKeyForm';
 import { DEFAULT_NOTEBOOKLM_PROMPT } from '@/lib/export/prompt';
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { canUseAi } from '@/lib/ai/keys';
+import { queueRecentSummaries, RESUMMARIZE_ON_LANGUAGE_CHANGE, summaryLanguageOf } from '@/lib/summaries';
 import Link from 'next/link';
 import { headers } from 'next/headers';
 import { revalidatePath } from 'next/cache';
@@ -119,6 +122,10 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
     const user = await currentUser(supabase);
     if (!user) return { ok: false, message: '未ログインです' };
 
+    // 言語が替わったかどうかを、書く前に控えておく（下で要約を積むため）。
+    const before = await summaryLanguageOf(supabase, user.id);
+    const language = normalizeLanguage(formData.get('summary_language'));
+
     const { error } = await supabase.from('settings').upsert(
       {
         user_id: user.id,
@@ -134,12 +141,25 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
         tts_voice_a: normalizeVoice(formData.get('tts_voice_a'), DEFAULT_VOICE_A),
         tts_voice_b: normalizeVoice(formData.get('tts_voice_b'), DEFAULT_VOICE_B),
         // 知らない値が入ると要約の言語が黙って壊れるので、必ず通す。
-        summary_language: normalizeLanguage(formData.get('summary_language')),
+        summary_language: language,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'user_id' },
     );
     if (error) return { ok: false, message: `保存できませんでした: ${error.message}` };
+
+    // 要約は言語ごと（0047）。新しい言語のぶんを、新しい記事から積む。
+    // 失敗しても設定の保存は済んでいるので、止めずに一言添えるだけにする。
+    let note = '';
+    if (language !== before && (await canUseAi(user.id))) {
+      try {
+        const queued = await queueRecentSummaries(supabase, createAdminClient(), language);
+        if (queued > 0) note = `。新しい記事${queued}件の要約をこの言語で作っています`;
+      } catch (e) {
+        console.error('queueRecentSummaries failed', e);
+        note = '。要約の作り直しは積めませんでした';
+      }
+    }
 
     revalidatePath('/settings');
     return {
@@ -149,6 +169,7 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
         hour: '2-digit',
         minute: '2-digit',
       }),
+      note,
     };
   }
 
@@ -329,11 +350,10 @@ async function Settings({ searchParams }: PageProps<'/settings'>) {
               </select>
               <p className="mt-1 text-xs text-zinc-500">
                 要約・見出し・音声の台本をこの言語で作ります。記事が何語で書かれていても構いません。
-                <strong className="text-zinc-400">効くのはこれから処理する記事から</strong>で、
-                既にある要約は作り直しません（作り直すと無料枠を大きく使うため）。
-                過去ぶんも揃えたいときは <code>npm run db:migrate</code> と同じ場所にある
-                <code className="mx-1">scripts/backfill-titles.mjs</code>
-                を使うか、記事を開いて「AI要約を生成する」を押してください。
+                要約は言語ごとに持っていて、同じ言語で読む人どうしで共有します。
+                言語を替えると、<strong className="text-zinc-400">新しい記事{RESUMMARIZE_ON_LANGUAGE_CHANGE}件ぶん</strong>
+                をあなたの鍵で作り直します。それより古い記事は要約なしで出るので、
+                要るものは記事を開いて「AI要約を生成する」を押してください。
               </p>
             </div>
 

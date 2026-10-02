@@ -4,10 +4,13 @@ import { summaryKeysFor } from './keys';
 
 const OWNER = 'owner';
 
-/** subscriptions と ai_keys だけを返す、問い合わせの形を真似た偽物。 */
+type Sub = { user_id: string; feed_id: string; created_at: string };
+
+/** subscriptions / ai_keys / settings だけを返す、問い合わせの形を真似た偽物。 */
 function fakeDb(
-  subs: { user_id: string; feed_id: string; created_at: string }[],
+  subs: Sub[],
   keys: { user_id: string; gemini_api_key: string }[],
+  settings: { user_id: string; summary_language: string }[] = [],
 ): SupabaseClient {
   const from = (table: string) => ({
     select: () => ({
@@ -18,10 +21,8 @@ function fakeDb(
             .sort((a, b) => a.created_at.localeCompare(b.created_at));
           return { order: async () => ({ data: rows, error: null }) };
         }
-        return Promise.resolve({
-          data: keys.filter((k) => values.includes(k.user_id)),
-          error: null,
-        });
+        const rows = (table === 'ai_keys' ? keys : settings) as { user_id: string }[];
+        return Promise.resolve({ data: rows.filter((r) => values.includes(r.user_id)), error: null });
       },
     }),
   });
@@ -47,7 +48,7 @@ describe('summaryKeysFor', () => {
       [{ user_id: 'alice', gemini_api_key: 'alice-key' }],
     );
     const keys = await summaryKeysFor(db, ['f1']);
-    expect(keys.get('f1')).toEqual({ userId: OWNER, apiKey: 'env-key' });
+    expect(keys.get('f1')?.get('ja')).toEqual({ userId: OWNER, apiKey: 'env-key' });
   });
 
   it('オーナーが鍵を保存していれば、環境変数より優先する', async () => {
@@ -56,7 +57,7 @@ describe('summaryKeysFor', () => {
       [{ user_id: OWNER, gemini_api_key: 'owner-stored' }],
     );
     const keys = await summaryKeysFor(db, ['f1']);
-    expect(keys.get('f1')?.apiKey).toBe('owner-stored');
+    expect(keys.get('f1')?.get('ja')?.apiKey).toBe('owner-stored');
   });
 
   it('オーナー以外は環境変数に落ちない（鍵を持つ購読者のうち先に購読した人）', async () => {
@@ -72,10 +73,30 @@ describe('summaryKeysFor', () => {
       ],
     );
     const keys = await summaryKeysFor(db, ['f2']);
-    expect(keys.get('f2')).toEqual({ userId: 'carol', apiKey: 'carol-key' });
+    expect(keys.get('f2')?.get('ja')).toEqual({ userId: 'carol', apiKey: 'carol-key' });
   });
 
-  it('誰も鍵を持っていなければ入らない（要約を見送る）', async () => {
+  it('言語ごとに、その言語で読む人の鍵を使う（他の言語の人の枠は使わない）', async () => {
+    const db = fakeDb(
+      [
+        { user_id: OWNER, feed_id: 'f4', created_at: '2026-01-01' },
+        { user_id: 'erin', feed_id: 'f4', created_at: '2026-01-02' },
+        { user_id: 'frank', feed_id: 'f4', created_at: '2026-01-03' },
+      ],
+      [{ user_id: 'erin', gemini_api_key: 'erin-key' }],
+      [
+        { user_id: 'erin', summary_language: 'en' },
+        { user_id: 'frank', summary_language: 'ko' },
+      ],
+    );
+    const keys = await summaryKeysFor(db, ['f4']);
+    expect(keys.get('f4')?.get('ja')?.userId).toBe(OWNER);
+    expect(keys.get('f4')?.get('en')).toEqual({ userId: 'erin', apiKey: 'erin-key' });
+    // 韓国語で読む人は鍵を持っていない。オーナーや erin の枠では作らない。
+    expect(keys.get('f4')?.has('ko')).toBe(false);
+  });
+
+  it('誰も鍵を持っていなければ入らない（要約を作らない）', async () => {
     const db = fakeDb([{ user_id: 'bob', feed_id: 'f3', created_at: '2026-01-01' }], []);
     const keys = await summaryKeysFor(db, ['f3']);
     expect(keys.has('f3')).toBe(false);

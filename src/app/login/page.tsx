@@ -1,31 +1,27 @@
 import { PasskeySignIn } from '@/components/PasskeySignIn';
 import { PasswordField } from '@/components/PasswordField';
-import { isAllowedEmail } from '@/lib/auth/allowlist';
 import { sessionState } from '@/lib/auth/guard';
 import { createClient } from '@/lib/supabase/server';
 import { headers } from 'next/headers';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 /**
  * ログイン画面。
  *
- * 自分専用なのでサインアップ導線は置かない。ユーザーは Supabase の
- * ダッシュボードで1つだけ作り、以後はメールアドレスとパスワードで入る。
+ * 新規登録は `/signup`（2026-10-02 から誰でも登録できる）。
  *
  * マジックリンクから替えた理由: スマホで毎回メールアプリへ行き来するのが面倒なうえ、
  * PKCE の都合で**リンクを送ったブラウザと同じブラウザで開かないと失敗する**。
  * メールアプリがアプリ内ブラウザで開くと、それだけで入れなくなる。
  * パスワードなら1画面で完結し、パスワードマネージャに任せられる。
  *
- * メールは初回のパスワード設定と、忘れたときの再設定にだけ使う。
+ * メールは忘れたときの再設定にだけ使う。
  *
- * 新規作成を止めているのは3枚:
- *   1. この画面にサインアップ導線を置かない
- *   2. ALLOWED_EMAILS               書いてあるアドレス以外には再設定メールも送らない
- *   3. Supabase の「Allow new users to sign up」をオフ  ← これが本丸
- * 1と2はアプリを通った場合にしか効かない。公開鍵で auth API を直接叩かれる経路は
- * 3でしか塞げない。**パスワードにしたぶん、3の重みは増している**
- * （リンクを踏ませる手間すら要らずにアカウントを作られる）。
+ * Supabase の「Allow new users to sign up」は**オフのまま**にしておくこと。
+ * 登録は `/signup` が Secret キーの admin API で作るので、その設定には左右されない。
+ * オンにすると、ブラウザに配られている公開鍵で auth API を直に叩いて、
+ * この画面を通らずにアカウントを作れてしまう。
  */
 
 /** これ未満は受け付けない。Supabase 側の既定（6）より少し厳しくする。 */
@@ -71,21 +67,6 @@ export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
     const email = String(formData.get('email') ?? '').trim();
     if (!email) redirect('/login?error=' + encodeURIComponent('メールアドレスを入力してください'));
 
-    // 許可していないアドレスには送らない。
-    //
-    // 以前はここで黙って `sent=1` に飛ばしていた。総当たりでアドレスの有無を
-    // 探られないための配慮だったが、**押しても何も起きないのと区別が付かない**。
-    // 実際「送った」と出たまま Supabase 側に recovery_sent_at が付かず、
-    // 何時間も届かないメールを待つことになった。
-    // サインアップは止めてあり、許可アドレスは1つなので、隠す実益より
-    // 「なぜ来ないか分かる」ほうが大事。
-    if (!isAllowedEmail(email)) {
-      redirect(
-        '/login?error=' +
-          encodeURIComponent('このアドレスは許可されていません（ALLOWED_EMAILS を確認してください）'),
-      );
-    }
-
     // 戻り先は localhost と本番で変わるので、実際のリクエストのホストから組み立てる。
     // ここで渡す URL は Supabase の Redirect URLs に登録されている必要がある。
     const head = await headers();
@@ -113,7 +94,7 @@ export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
     <main className="flex-1 overflow-y-auto flex items-center justify-center p-6">
       <div className="w-full max-w-sm">
         <h1 className="text-2xl font-bold mb-1">RSSTube</h1>
-        <p className="text-sm text-zinc-400 mb-6">AI要約つきの個人用RSSリーダー</p>
+        <p className="text-sm text-zinc-400 mb-6">AI要約つきのRSSリーダー</p>
 
         {sent ? (
           <p className="rounded border border-emerald-800 bg-emerald-950/50 p-3 text-sm">
@@ -150,7 +131,7 @@ export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
                 formNoValidate を付けるのは、パスワード欄が空でも送れるようにするため。 */}
             <div className="border-t border-zinc-800 pt-4">
               <p className="mb-2 text-xs text-zinc-500">
-                はじめて使うとき、またはパスワードを忘れたときは、メールアドレスだけ入れて
+                パスワードを忘れたときは、メールアドレスだけ入れて
                 こちらを押してください。設定用のリンクを送ります。
               </p>
               <button
@@ -171,6 +152,13 @@ export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
           同じ <form> に混ぜると Enter キーの行き先が紛らわしくなるため。
         */}
         <PasskeySignIn />
+
+        <p className="mt-6 text-center text-sm text-zinc-400">
+          はじめての方は{' '}
+          <Link href="/signup" className="text-zinc-100 underline">
+            新規登録
+          </Link>
+        </p>
 
         {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
       </div>

@@ -13,6 +13,7 @@ import { connectionString } from './db-connect.mjs';
  *
  *   node --env-file=.env.local scripts/backfill-titles.mjs        # 何件対象かを見るだけ
  *   node --env-file=.env.local scripts/backfill-titles.mjs --run  # 実行する
+ *   … --lang=en                                                    # ja 以外の見出しを埋める
  */
 
 const RUN = process.argv.includes('--run');
@@ -22,8 +23,9 @@ const MODEL = process.env.GEMINI_SUMMARY_MODEL ?? 'gemini-3.5-flash-lite';
 const client = new pg.Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } });
 await client.connect();
 
-const language =
-  (await client.query(`select summary_language from settings limit 1`)).rows[0]?.summary_language ?? 'ja';
+// 要約は言語ごとに持つ（0047）。どの言語の見出しを埋めるかは引数で選ぶ（既定 ja）。
+const langArg = process.argv.find((a) => a.startsWith('--lang='));
+const language = langArg ? langArg.slice('--lang='.length) : 'ja';
 
 /**
  * 対象は「要約はあるが title_ja が無い」もの。
@@ -33,8 +35,9 @@ const targets = (
   await client.query(
     `select s.article_id, a.title
        from summaries s join articles a on a.id = s.article_id
-      where s.title_ja is null
+      where s.title_ja is null and s.language = $1
       order by a.published_at desc nulls last`,
+    [language],
   )
 ).rows;
 
@@ -107,7 +110,7 @@ for (let i = 0; i < targets.length; i += BATCH) {
     if (!known.has(row.id)) continue;
     const title = String(row.title ?? '').trim().slice(0, 120);
     if (!title) continue;
-    await client.query(`update summaries set title_ja = $1 where article_id = $2`, [title, row.id]);
+    await client.query(`update summaries set title_ja = $1 where article_id = $2 and language = $3`, [title, row.id, language]);
     done++;
   }
 

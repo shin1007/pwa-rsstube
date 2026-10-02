@@ -1,3 +1,4 @@
+import { oneSummary } from '@/lib/summaries';
 import { createClient } from '@/lib/supabase/server';
 import { sanitizeSearch } from '@/lib/search';
 import { PAGE_SIZE, asId, type ArticleRow, type View } from '@/lib/types';
@@ -147,6 +148,10 @@ export async function getArticle(id: string) {
   const states = data.article_states as unknown;
   return {
     ...data,
+    // 言語ごとに持つので配列で返る（0047）。RLS が自分の言語だけに絞っている。
+    summaries: oneSummary(
+      data.summaries as unknown as { bullets: string[]; tags: string[]; title_ja: string | null }[],
+    ),
     article_states: (Array.isArray(states) ? (states[0] ?? null) : states) as
       | { is_read: boolean; is_starred: boolean; exported_at: string | null }
       | null,

@@ -1,3 +1,4 @@
+import { oneSummary } from '@/lib/summaries';
 import { generateScript, type ScriptLine, type Slide, type VoiceMode } from '@/lib/ai/script';
 import { normalizeLanguage } from '@/lib/language';
 import { DEFAULT_VOICE_MODE } from '@/lib/settings/defaults';
@@ -63,11 +64,11 @@ export async function runScriptJob(db: SupabaseClient, job: Job): Promise<boolea
 
     await db.from('media').update({ status: 'scripting' }).eq('id', mediaId);
 
-    const source = await loadSource(db, media);
+    const { extra, language } = await scriptSettings(db, media.user_id);
+    const source = await loadSource(db, media, language);
     // モードは media に焼いてある（create.ts が設定から写す）。ここで設定を
     // 見に行かないのは、生成中に設定を変えられると台本と声が食い違うため。
     const mode = (media.voice_mode ?? DEFAULT_VOICE_MODE) as VoiceMode;
-    const { extra, language } = await scriptSettings(db, media.user_id);
     const { lines, slides, usage } = await generateScript(apiKey, source, extra, mode, language);
     await recordUsage(db, media.user_id, SCRIPT_MODEL, usage.inputTokens, usage.outputTokens, true);
 
@@ -380,6 +381,8 @@ export function groupIntoSegments(
 async function loadSource(
   db: SupabaseClient,
   media: { kind: string; article_id: string | null; digest_id: string | null; title: string },
+  /** 要点を拾う言語。Secret キーなので RLS が絞らない。台本と同じ言語を渡す（0047）。 */
+  language: string,
 ) {
   let ids: string[] = [];
 
@@ -399,7 +402,8 @@ async function loadSource(
   const { data } = await db
     .from('articles')
     .select('id, title, url, content_text, image_url, summaries (bullets)')
-    .in('id', ids);
+    .in('id', ids)
+    .eq('summaries.language', language);
 
   const rows = (data ?? []) as unknown as {
     id: string;
@@ -407,7 +411,7 @@ async function loadSource(
     url: string;
     content_text: string | null;
     image_url: string | null;
-    summaries: { bullets: string[] } | null;
+    summaries: { bullets: string[] }[] | null;
   }[];
 
   // 渡した順（＝ダイジェストの選抜順）で話させる。
@@ -420,7 +424,7 @@ async function loadSource(
       id: r.id,
       title: r.title,
       url: r.url,
-      bullets: r.summaries?.bullets ?? [],
+      bullets: oneSummary(r.summaries)?.bullets ?? [],
       imageUrl: r.image_url,
       text: r.content_text ?? '',
     })),
