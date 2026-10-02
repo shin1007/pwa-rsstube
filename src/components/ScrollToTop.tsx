@@ -10,7 +10,7 @@ export function ScrollToTop() {
     if (!scrollContainer) return;
 
     const handleScroll = () => {
-      setIsVisible(scrollContainer.scrollTop > 300);
+      setIsVisible(scrollContainer.scrollTop > 100);
     };
 
     scrollContainer.addEventListener('scroll', handleScroll);
