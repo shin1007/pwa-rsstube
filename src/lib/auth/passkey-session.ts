@@ -1,4 +1,3 @@
-import { isAllowedEmail } from '@/lib/auth/allowlist';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 
@@ -17,9 +16,6 @@ import { createClient } from '@/lib/supabase/server';
  *
  * この関数を呼ぶ前に、必ず署名の検証を済ませておくこと。ここは「本人だと分かった
  * あとの手続き」しかしない。
- *
- * ALLOWED_EMAILS の確認は**ここでやる**。呼ぶ側に任せると、入口を1つ足した日に
- * 忘れる種類の確認で、忘れても普通にログインできてしまうので気づけない。
  */
 export async function signInAsUser(userId: string): Promise<{ email: string }> {
   const admin = createAdminClient();
@@ -29,12 +25,6 @@ export async function signInAsUser(userId: string): Promise<{ email: string }> {
     throw new Error('このパスキーに対応するユーザーが見つかりません');
   }
   const email = user.user.email;
-
-  // 許可していないアドレスには、鍵が正しくてもセッションを作らない
-  // （パスワードの入口と同じ壁を、こちらにも立てる）。
-  if (!isAllowedEmail(email)) {
-    throw new Error('このアカウントではログインできません');
-  }
 
   const { data: link, error: linkError } = await admin.auth.admin.generateLink({
     type: 'magiclink',

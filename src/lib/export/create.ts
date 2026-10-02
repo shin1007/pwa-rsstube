@@ -1,3 +1,4 @@
+import { oneSummary, summaryLanguageOf } from '@/lib/summaries';
 import { JST } from '@/lib/datetime';
 import { buildMarkdown, type ExportArticle } from '@/lib/export/markdown';
 import { DEFAULT_NOTEBOOKLM_PROMPT } from '@/lib/export/prompt';
@@ -24,7 +25,7 @@ type Raw = {
   content_text: string | null;
   content_ok: boolean;
   feeds: { title: string } | null;
-  summaries: { bullets: string[]; title_ja: string | null } | null;
+  summaries: { bullets: string[]; title_ja: string | null }[] | null;
 };
 
 export type ExportResult = {
@@ -43,13 +44,17 @@ export async function createExportFor(
 ): Promise<ExportResult> {
   if (articleIds.length === 0) throw new Error('記事が選択されていません');
 
+  // ダイジェストは Secret キーで呼ばれるので RLS が言語を絞らない。必ず指定する（0047）。
+  const language = await summaryLanguageOf(db, userId);
+
   const { data, error } = await db
     .from('articles')
     .select(
       `id, title, url, author, published_at, content_text, content_ok,
        feeds (title), summaries (bullets, title_ja)`,
     )
-    .in('id', articleIds);
+    .in('id', articleIds)
+    .eq('summaries.language', language);
   if (error) throw error;
 
   const rows = (data ?? []) as unknown as Raw[];
@@ -65,8 +70,8 @@ export async function createExportFor(
     feedTitle: r.feeds?.title ?? null,
     author: r.author,
     publishedAt: r.published_at,
-    bullets: r.summaries?.bullets ?? null,
-    titleJa: r.summaries?.title_ja ?? null,
+    bullets: oneSummary(r.summaries)?.bullets ?? null,
+    titleJa: oneSummary(r.summaries)?.title_ja ?? null,
     contentText: r.content_text,
     contentOk: r.content_ok,
   }));

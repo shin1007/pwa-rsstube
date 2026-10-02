@@ -1,3 +1,4 @@
+import { oneSummary } from '@/lib/summaries';
 import { currentUser } from '@/lib/auth/session';
 import { createClient } from '@/lib/supabase/server';
 
@@ -84,12 +85,14 @@ export async function GET() {
     content_ok: boolean;
     extract_fail: string | null;
     feeds: { title: string } | null;
-    summaries: { bullets: string[]; title_ja: string | null } | null;
+    // 言語ごとに持つので配列で返る（0047）。RLS が自分の言語だけに絞っている。
+    summaries: { bullets: string[]; title_ja: string | null }[] | null;
   };
 
   let budget = MAX_TOTAL_CHARS;
 
   const articles = ((data ?? []) as unknown as Row[]).map((r) => {
+    const summary = oneSummary(r.summaries);
     const full = r.content_html ? stripMedia(r.content_html) : (r.content_text ?? '');
     // 上限に当たったら、そこから先は本文を持たない（見出しと要点だけ残す）。
     const room = Math.min(MAX_CHARS, budget);
@@ -98,11 +101,11 @@ export async function GET() {
 
     return {
       id: r.id,
-      title: r.summaries?.title_ja?.trim() || r.title,
+      title: summary?.title_ja?.trim() || r.title,
       url: r.url,
       feed: r.feeds?.title ?? null,
       published_at: r.published_at,
-      bullets: r.summaries?.bullets?.slice(0, 3) ?? [],
+      bullets: summary?.bullets?.slice(0, 3) ?? [],
       /** 本文。HTML があればそちら、無ければ素のテキスト。どちらも無ければ null。 */
       html: r.content_html && body ? body : null,
       text: !r.content_html && body ? body : null,

@@ -18,7 +18,7 @@ import { useActionState } from 'react';
  * （app/actions/media.ts の注記と同じ話）。
  */
 
-export type SaveState = { ok: true; at: string } | { ok: false; message: string } | null;
+export type SaveState = { ok: true; at: string; note?: string } | { ok: false; message: string } | null;
 
 export function SettingsForm({
   action,
@@ -44,7 +44,7 @@ export function SettingsForm({
 
         {/* 時刻も出す。二度目以降は文言だけだと変化が見えない。 */}
         {state?.ok && (
-          <span className="text-xs text-emerald-400">保存しました（{state.at}）</span>
+          <span className="text-xs text-emerald-400">保存しました（{state.at}）{state.note}</span>
         )}
         {state && !state.ok && <span className="text-xs text-red-400">{state.message}</span>}
       </div>

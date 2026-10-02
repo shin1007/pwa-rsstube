@@ -241,7 +241,11 @@ async function runExtractJobs(db: SupabaseClient, deadline: number): Promise<num
       // 返してくる。それが一覧に並ぶうえ、無料枠も1件ぶん使う。
       // 実データで43件（漫画の各話・審議会の資料ページなど）がこれだった。
       if (text.trim() && (attempts === 1 || ok)) {
-        await enqueue(db, 'summarize', { article_id: articleId });
+        // 読み手の言語ごとに1本ずつ（0047）。鍵を持つ読み手がいない言語は積まない。
+        const languages = (await summaryKeysFor(db, [article.feed_id])).get(article.feed_id);
+        for (const language of languages?.keys() ?? []) {
+          await enqueue(db, 'summarize', { article_id: articleId, language });
+        }
       }
 
       await complete(db, job.id);
@@ -269,15 +273,20 @@ async function runExtractJobs(db: SupabaseClient, deadline: number): Promise<num
 
 /** 要約。複数記事を1リクエストにまとめて無料枠を節約する。 */
 async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<number> {
-  // 要約は全ユーザー共通なので（0005）、言語も1つしか選べない。
-  // 当面はオーナーの設定をその1つとして使う。購読者ごとに言語を変えたくなったら、
-  // summaries を (article_id, language) で持つ形にする必要がある。
-  const { data: settings } = await db
-    .from('settings')
-    .select('summary_language')
-    .eq('user_id', ownerUserId())
-    .maybeSingle();
-  const language = normalizeLanguage(settings?.summary_language);
+  // 言語を持たないジョブは 0047 より前に積まれたもの。当時はオーナーの言語で作っていた。
+  let legacyLanguage: string | null = null;
+  const languageOf = async (job: Job): Promise<string> => {
+    if (typeof job.payload.language === 'string') return normalizeLanguage(job.payload.language);
+    if (legacyLanguage === null) {
+      const { data } = await db
+        .from('settings')
+        .select('summary_language')
+        .eq('user_id', ownerUserId())
+        .maybeSingle();
+      legacyLanguage = normalizeLanguage(data?.summary_language);
+    }
+    return legacyLanguage;
+  };
 
   let done = 0;
 
@@ -286,82 +295,69 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
     const jobs = await claim(db, BATCH_SIZE, 'summarize');
     if (jobs.length === 0) break;
 
-    const byArticle = new Map<string, Job>();
+    // 仕事の単位は「記事×言語」（0047）。同じ記事でも言語が違えば別の要約。
+    const pending: { job: Job; articleId: string; language: string }[] = [];
     for (const job of jobs) {
       const id = job.payload.article_id as string | undefined;
-      if (id) byArticle.set(id, job);
+      if (id) pending.push({ job, articleId: id, language: await languageOf(job) });
       else await complete(db, job.id);
     }
-    if (byArticle.size === 0) continue;
+    if (pending.length === 0) continue;
 
     const { data: articles } = await db
       .from('articles')
       .select('id, feed_id, title, content_text, content_ok')
-      .in('id', [...byArticle.keys()]);
+      .in('id', [...new Set(pending.map((p) => p.articleId))]);
+    const articleById = new Map((articles ?? []).map((a) => [a.id as string, a]));
 
     /**
-     * 誰の鍵で要約するか（0046・lib/ai/keys.ts）。記事は共通なので、
-     * フィードの購読者のうちの誰か1人の鍵で1回作れば全員に付く。
+     * 誰の鍵で要約するか（0047・lib/ai/keys.ts）。同じ言語の読み手どうしでは
+     * 要約は共通なので、その言語で読む購読者のうち誰か1人の鍵で1回作れば足りる。
      */
     const keys = await summaryKeysFor(db, [
       ...new Set((articles ?? []).map((a) => a.feed_id as string)),
     ]);
 
-    /**
-     * 中身が空の記事はモデルに渡さない。
-     *
-     * 積む側でも弾いているが、手で積み直したぶんや、以前のコードで積まれた
-     * ぶんがここに来る。渡すと「本文や具体的な情報は存在しない」という
-     * 入力の説明が返ってきて、それが要約として保存される。
-     * ジョブは完了扱いにする——待たせても中身が増えることはない。
-     */
-    const groups = new Map<string, { holder: KeyHolder; inputs: SummaryInput[] }>();
-    const skipped: string[] = [];
-    for (const a of articles ?? []) {
-      const text = (a.content_text ?? '').trim();
-      if (!text) {
-        const job = byArticle.get(a.id);
-        if (job) {
-          await complete(db, job.id);
-          byArticle.delete(a.id);
-        }
+    // 1回の呼び出しは「同じ鍵・同じ言語」の記事だけで組む。
+    const groups = new Map<
+      string,
+      { holder: KeyHolder; language: string; inputs: SummaryInput[]; jobs: Map<string, Job> }
+    >();
+    for (const { job, articleId, language } of pending) {
+      const a = articleById.get(articleId);
+      if (!a) {
+        // 記事が消えている（保持期間・購読解除）。待っても戻らない。
+        await complete(db, job.id);
         continue;
       }
-      const holder = keys.get(a.feed_id);
-      if (!holder) {
-        skipped.push(a.id);
-        continue;
-      }
-      const group = groups.get(holder.userId) ?? { holder, inputs: [] };
-      group.inputs.push({ id: a.id, title: a.title, text, contentOk: a.content_ok });
-      groups.set(holder.userId, group);
-    }
 
-    /**
-     * 鍵を持つ購読者が1人もいない記事は、要約を見送る。
-     *
-     * **印を付けること。** 0045 で「要約が付くまで一覧に出さない」にしたので、
-     * 印が無いとこの記事は永久に一覧に出ない（待っても付かない）。
-     * あとで誰かが鍵を入れたら、「要約なし」ビューから積み直せる。
-     */
-    if (skipped.length > 0) {
-      const { error } = await db
-        .from('articles')
-        .update({ summary_skipped_at: new Date().toISOString() })
-        .in('id', skipped);
-      if (error) throw error;
-      for (const id of skipped) {
-        const job = byArticle.get(id);
-        if (job) await complete(db, job.id);
-        byArticle.delete(id);
+      /**
+       * 中身が空の記事はモデルに渡さない。
+       *
+       * 積む側でも弾いているが、手で積み直したぶんや、以前のコードで積まれた
+       * ぶんがここに来る。渡すと「本文や具体的な情報は存在しない」という
+       * 入力の説明が返ってきて、それが要約として保存される。
+       * ジョブは完了扱いにする——待たせても中身が増えることはない。
+       */
+      const text = (a.content_text ?? '').trim();
+      // その言語で読む人に鍵が無ければ作らない。待っても鍵は増えないので完了扱い。
+      // 一覧のほうは「鍵が無い人には要約待ちを隠さない」ので、記事は出る（0047）。
+      const holder = keys.get(a.feed_id)?.get(language);
+      if (!text || !holder) {
+        await complete(db, job.id);
+        continue;
       }
+
+      const groupKey = `${holder.userId}|${language}`;
+      const group =
+        groups.get(groupKey) ?? { holder, language, inputs: [], jobs: new Map<string, Job>() };
+      group.inputs.push({ id: a.id, title: a.title, text, contentOk: a.content_ok });
+      group.jobs.set(a.id, job);
+      groups.set(groupKey, group);
     }
 
     let limited = false;
-    for (const { holder, inputs } of groups.values()) {
-      const groupJobs = new Map(
-        inputs.map((a) => [a.id, byArticle.get(a.id)!] as const).filter(([, j]) => j),
-      );
+    for (const { holder, language, inputs, jobs: groupJobs } of groups.values()) {
       try {
         const { results, model, usage } = await summarizeBatch(holder.apiKey, inputs, language);
         await recordUsage(db, holder.userId, model, usage.inputTokens, usage.outputTokens, true);
@@ -370,6 +366,7 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
           const { error } = await db.from('summaries').upsert(
             results.map((r) => ({
               article_id: r.id,
+              language,
               // 空で返ってきたら列を埋めない。空文字を入れると「訳した結果が空」と
               // 区別できず、画面側で原題に戻す判断ができなくなる。
               title_ja: r.title_ja?.trim() || null,
@@ -377,7 +374,7 @@ async function runSummarizeJobs(db: SupabaseClient, deadline: number): Promise<n
               tags: r.tags,
               model,
             })),
-            { onConflict: 'article_id' },
+            { onConflict: 'article_id,language' },
           );
           if (error) throw error;
         }
