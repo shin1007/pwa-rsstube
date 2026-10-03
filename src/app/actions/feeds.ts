@@ -8,6 +8,7 @@ import { discoverFeeds, type FeedCandidate } from '@/lib/feeds/discover';
 import { fanOutStates, ingestFeedItems } from '@/lib/feeds/ingest';
 import { relocateFeedUrl } from '@/lib/feeds/relocate';
 import { pollFeeds, type PollableFeed } from '@/lib/feeds/poll';
+import { countMyArrivals, refreshMessage } from '@/lib/feeds/refresh-message';
 import { looksLikeUrl, searchFeeds } from '@/lib/feeds/search';
 import { parseOpml } from '@/lib/feeds/opml';
 import { createClient } from '@/lib/supabase/server';
@@ -479,14 +480,23 @@ async function refreshFeedsImpl(): Promise<string> {
    */
   const oldest = list[0]?.last_fetched_at;
   if (oldest && Date.now() - new Date(oldest).getTime() < REFRESH_COOLDOWN_MS) {
-    return 'さっき取りに行ったばかりです';
+    return refreshMessage(
+      await countMyArrivals(supabase, new Date()),
+      'さっき取りに行ったばかりです',
+    );
   }
 
+  // 1秒の余裕は Vercel と DB の時計のずれのぶん。
+  const startedAt = new Date(Date.now() - 1000);
   const r = await pollFeeds(db, list, REFRESH_BUDGET_MS);
   revalidatePath('/');
 
-  if (r.newArticles === 0) {
-    return r.polled === 0 ? '新しい記事はありませんでした' : `${r.polled}本を見ましたが、新着はありません`;
-  }
-  return `新しい記事が${r.newArticles}件`;
+  /**
+   * **`r.newArticles` をそのまま見せないこと。** 他人のフィードの新着も入っていて、
+   * 自分のぶんも要約が付くまで一覧に出ない。「3件」と出たのに一覧が増えず、
+   * もう一度押すと「新着なし」になった（lib/feeds/refresh-message.ts）。
+   */
+  const base =
+    r.polled === 0 ? '新しい記事はありませんでした' : `${r.polled}本を見ましたが、新着はありません`;
+  return refreshMessage(await countMyArrivals(supabase, startedAt), base);
 }
