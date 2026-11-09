@@ -126,3 +126,17 @@ Supabase · PostgREST · actions/ · 追加した依存 を触るときに読む
   権限を残したまま RLS だけ有効にすると「0行が返る」形で通ってしまう。
   取り上げてあれば 401 で止まる（確認: anon キーで `/rest/v1/<表>` を叩いて
   `42501 permission denied` が返ること）。
+
+## PGroonga の索引は、VACUUM するまで古いファイルを捨てない（0048）
+
+2026-11-10、DB が **901MB**（無料枠 500MB）あった。テーブルを全部足しても 209MB しかなく、
+残りは **PGroonga の索引ファイル**（`pg_relation_size` には 0 bytes と出る。別ファイルのため）。
+古い索引ファイルは VACUUM が来るまで残り、autovacuum は dead tuple が閾値を超えないと来ない。
+`vacuum articles` だけで 901MB → 571MB。**REINDEX しただけでは逆に増える**（1167MB。新旧が並ぶ）。
+
+同時に、`purge_article_bodies()` が `article_states` の行がある記事しか見ていなかった。
+未読は行が無いので、**開かなかった記事の本文は永久に残っていた**（本文ありの37%）。
+0048 で、保持期間を過ぎたら未読でも落とし、さらに本文の合計を 30MB で頭打ちにした。
+毎日 3:40 に `rsstube-vacuum`、3:35 に cron の履歴（`cron.job_run_details`、43MB あった）を7日で切る。
+
+大きさは `pg_database_size()` で見ること。テーブルごとの合計では PGroonga が見えない。
