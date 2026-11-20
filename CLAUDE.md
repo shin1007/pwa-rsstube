@@ -264,6 +264,7 @@ PR を出したまま止めると、マージのためだけにもう一往復�
 - `article_states` の埋め込みは配列で返る（型では気づけない）。
 - `public` に作った表は、RLS を書かなければ anon キーだけで読み書きできる。
 - PGroonga の索引は、VACUUM するまで古いファイルを捨てない（DB が 901MB あった）。
+- 毎日 VACUUM しても PGroonga の索引は膨らむ。毎日 REINDEX → VACUUM（0049）。
 
 ### 画面と操作 — `docs/traps/ui.md`
 
