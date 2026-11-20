@@ -140,3 +140,8 @@ Supabase · PostgREST · actions/ · 追加した依存 を触るときに読む
 毎日 3:40 に `rsstube-vacuum`、3:35 に cron の履歴（`cron.job_run_details`、43MB あった）を7日で切る。
 
 大きさは `pg_database_size()` で見ること。テーブルごとの合計では PGroonga が見えない。
+
+**毎日 VACUUM でも足りなかった（0049）。** 10日で 571MB → 827MB に戻った。テーブルは 188MB のまま。
+本文を落とす update のたびに索引の中が断片化し、VACUUM では縮まない。REINDEX → VACUUM で
+827MB → 502MB。毎日 3:38 に `rsstube-reindex`、3:50 に `rsstube-vacuum`（REINDEX の後に必ず VACUUM）。
+作り直した直後の索引は本文テキストの約9倍（35MB → 約310MB）。これ以上縮めるなら本文の上限を下げる。
