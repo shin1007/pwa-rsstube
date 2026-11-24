@@ -46,6 +46,22 @@ type Trail = {
 
 const EMPTY: Trail = { key: null, ids: [], pos: -1 };
 
+/**
+ * 記事ごとに「サーバーが出した前／次」を覚えておく。**向きを知るため。**
+ *
+ * 来た道は開いた順だが、知らない記事へ「前」で進んだときまで**後ろに足すと**、
+ * その記事の「前」が来た道（＝さっきの記事）になって、2件のあいだを行き来し続ける。
+ * 例: B で ← を押すとサーバーの前は A。`[B, A]` と記録すると、A で ← を押したとき
+ * 来た道が B を指す。B で ← → A、A で ← → B …と永久に着かない。
+ * スターを外した記事は一覧から抜けるので、特に踏みやすい。
+ */
+const serverHeads = new Map<string, { prev?: string; next?: string }>();
+
+function articleIdOf(href?: string) {
+  if (!href) return undefined;
+  return new URL(href, 'http://local').searchParams.get('article') ?? undefined;
+}
+
 let state: Trail = EMPTY;
 const listeners = new Set<() => void>();
 
@@ -90,10 +106,34 @@ export function recordVisit(key: string, id: string) {
   if (at === state.pos) return;
   if (at >= 0) {
     state = { ...state, pos: at };
+  } else if (isServerPrev(state.ids[state.pos], id)) {
+    // 「前」へ進んだ。手前に差し込む（pos は新しい記事を指したまま）。
+    state = { key, ids: [...state.ids.slice(0, state.pos), id, ...state.ids.slice(state.pos)], pos: state.pos };
   } else {
     state = { key, ids: [...state.ids.slice(0, state.pos + 1), id], pos: state.pos + 1 };
   }
   notify();
+}
+
+function isServerPrev(from: string | undefined, id: string) {
+  const heads = from ? serverHeads.get(from) : undefined;
+  return !!heads && heads.prev === id && heads.next !== id;
+}
+
+/** テスト用。いまの並びを返す。 */
+export function trailSnapshot() {
+  return state;
+}
+
+/** テスト用。覚えを捨てる。 */
+export function resetTrail() {
+  state = EMPTY;
+  serverHeads.clear();
+}
+
+/** テスト用。サーバーが出した前後を覚えさせる。 */
+export function rememberHeads(id: string, prev?: string, next?: string) {
+  serverHeads.set(id, { prev, next });
 }
 
 /** 記事を除いた検索文字列。これが「同じ一覧を見ている」の判定になる。 */
@@ -128,6 +168,11 @@ export function useNeighbours(
   const searchParams = useSearchParams();
   const key = filterKey(searchParams);
   const trail = useSyncExternalStore(subscribe, snapshot, serverSnapshot);
+
+  useEffect(() => {
+    if (!articleId) return;
+    serverHeads.set(articleId, { prev: articleIdOf(prevHref), next: articleIdOf(nextHref) });
+  }, [articleId, prevHref, nextHref]);
 
   if (!articleId || trail.key !== key) return { prevHref, nextHref };
 
